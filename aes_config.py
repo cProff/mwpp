@@ -1,5 +1,5 @@
 import requests
-from jsbeautifier import beautify
+from jsbeautifier import beautify as bf
 from my_web import search_bounds
 import subprocess
 from binascii import unhexlify
@@ -10,12 +10,12 @@ import random, os, string #for tempfiles
 import js2py
 
 BAD_PART = '''{
-                        a: this.options.partner_id,
-                        b: this.options.domain_id,
-                        c: e._mw_adb,
-                        e: this.options.video_token,
-                        f: navigator.userAgent
-                    }'''
+        a: this.options.partner_id,
+        b: this.options.domain_id,
+        c: e._mw_adb,
+        e: this.options.video_token,
+        f: navigator.userAgent
+    }'''
 
 
 class Tempfile():
@@ -42,52 +42,60 @@ def node_run(code):
         return process.communicate()
         
 
+class TaskTimer():
+    __level__ = 0
+    def __init__(self, runText, stopText):
+        self.runText = runText
+        self.stopText = stopText
+    def __enter__(self):
+        self.t = time.time()
+        print('{}{}'.format('\t'*TaskTimer.__level__, self.runText))
+        TaskTimer.__level__ += 1
+    def __exit__(self, a, b, c):
+        TaskTimer.__level__ -= 1
+        print('{}{}. It takes {:.3} sec'.format('\t'*TaskTimer.__level__, self.stopText, time.time()-self.t))
+
+
+def find_func_start(code, pos):
+    level = 1
+    while(pos > 0 and level != 0):
+        if(code[pos] == '}'):
+            level+=1
+        elif(code[pos] == '{'):
+            level-=1
+        pos-=1
+    return pos+2
+
 
 def get_aes_config(url):
-    #~~~ download js code
-    print('Corrupting AES keys...')
-    t1 = time.time()
-    
-    jsResponse = requests.get(url)
-    jsCode = beautify(jsResponse.text)
-    #~~~ find getVideoManifest function code
-    funcText = search_bounds(jsCode, 
-                        'getVideoManifests: function() {', 'onGetManifestSuccess') 
-    #~~~ hacking(parsing) func text to find aes key and iv'
-    ## was deleted on 08.11
-    # implementCode = 'r=[' + search_bounds(funcText, 'r = [', 'l = ').rstrip('\n ,')+';' 
-    # implementCode1 = 'function add(){var e = Object.create(null);' + implementCode+'return l;}'
-    # implementCode2 = 'function add(){var e = Object.create(null);' + implementCode+'return c;}'
-    # a = js2py.eval_js(implementCode1)
-    # s = js2py.eval_js(implementCode2)
-    # keyData = s()
-    # ivData = a()
-    ## was added on 08.11
-    ## was deleted on 14.11
-    # implementCode = search_bounds(funcText, False, 'u =').replace(BAD_PART, 'var').strip().rstrip(',') + ';'
-    # implementCode1 = 'var e = Object.create(null);' + implementCode+'console.log(l);'
-    # implementCode2 = 'var e = Object.create(null);' + implementCode+'console.log(c);'
-    # out, err = node_run(implementCode1)
-    # keyData = out.strip()
-    # out, err = node_run(implementCode2)
-    # ivData = out.strip()
-    ## was added on 14.11
-    implementCode = search_bounds(funcText, False, 'CryptoJS').replace(BAD_PART, '0').replace('JSON.stringify', '')
-    #    #~~~ delete unused last string:
-    implementCode = implementCode[:implementCode.rfind(',')] + ';'
-    lastVars = [line.split('=')[0].strip() for line in implementCode[implementCode.rfind('var')+3:].split('\n')] # contains names of variables
-    # input(str(lastVars))
-    initCode = 'function() { var e = Object.create(null);'
-    returnCode = '\nreturn [{}, {}];'.format(*lastVars)+'}'
-    print('JS decoding...')
-    res = js2py.eval_js(initCode + implementCode + returnCode)()
-    print(res)
-    print('JS compilation ended.')
-    keyData = res[0]
-    ivData = res[1]
-    
-    #~~~ change default aes values and return results
-    AES_DEFAULT_KEY = unhexlify(keyData)
-    AES_DEFAULT_IV = unhexlify(ivData)
-    print('AES keys corrupted. It takes {:.2} sec'.format(time.time()-t1))
+    with TaskTimer('Corruting AES keys...', 'AES keys are corrupted'):
+        #~~~ download js code
+        t1 = time.time()
+        with TaskTimer('Loading JS code...', 'JS code loaded'):
+            jsResponse = requests.get(url)
+        jsCode = jsResponse.text
+        #~~~ find getVideoManifest function code
+        ajaxPos = jsCode.find('t.ajax')
+        funcStart = find_func_start(jsCode, ajaxPos)
+        funcText = jsCode[funcStart:ajaxPos]
+        with TaskTimer('Beautifying JS code...', 'JS code is beauty :)'):
+            funcText = bf(str(funcText)+'\n')
+        #~~~ hacking(parsing) func text to find aes key and iv'
+        implementCode = search_bounds(funcText, False, 'CryptoJS').replace(BAD_PART, '0').replace('JSON.stringify', '')
+        #~~~ delete unused last string:
+        implementCode = implementCode[:implementCode.rfind(',')] + ';'
+        lastVars = [line.split('=')[0].strip() for line in implementCode[implementCode.rfind('var')+3:].split('\n')] # contains names of variables
+        initCode = 'function() { var e = Object.create(null);'
+        returnCode = '\nreturn [{}, {}];'.format(*lastVars)+'}'
+        with TaskTimer('Compilation of JS code...', 'JS code was transformed to python code'):
+            res = js2py.eval_js(initCode + implementCode + returnCode)()
+        keyData = res[0]
+        ivData = res[1]
+
+        #~~~ change default aes values and return results
+        AES_DEFAULT_KEY = unhexlify(keyData)
+        AES_DEFAULT_IV = unhexlify(ivData)
     return AES_DEFAULT_KEY, AES_DEFAULT_IV
+
+if __name__ == "__main__":
+    get_aes_config('https://streamguard.cc/assets/video-9f4475bcc7bc5cd42689a6fca30f9c3847742f11a167070176ab47a913d62579.js')
